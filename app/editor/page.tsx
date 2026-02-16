@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Trash2, FileText, Check } from "lucide-react";
+import { ArrowLeft, Trash2, FileText, Check, Upload, X } from "lucide-react";
 import { PDFViewer, PDFViewerHandle } from "@/components/pdf/PDFViewer";
 import { ZoomControls } from "@/components/pdf/ZoomControls";
 import { PageNavigation } from "@/components/pdf/PageNavigation";
@@ -14,6 +14,7 @@ import { useSelection } from "@/hooks/useSelection";
 import { useProcessing } from "@/hooks/useProcessing";
 import { getFile, clearFile } from "@/lib/storage/indexedDB";
 import { detectBackgroundColor, rgbToNormalized } from "@/lib/utils/colorDetection";
+import { hexToNormalizedRgb } from "@/lib/utils/colorUtils";
 
 export default function EditorPage() {
   const router = useRouter();
@@ -22,6 +23,20 @@ export default function EditorPage() {
   const [filename, setFilename] = useState<string>("document.pdf");
   const [applyToAll, setApplyToAll] = useState(true);
   const [initialLoading, setInitialLoading] = useState(true);
+
+  // Custom watermark state
+  const [addCustomWatermark, setAddCustomWatermark] = useState(false);
+  const [watermarkType, setWatermarkType] = useState<"text" | "image">("text");
+  // Text watermark options
+  const [watermarkText, setWatermarkText] = useState("");
+  const [watermarkFontSize, setWatermarkFontSize] = useState(12);
+  const [watermarkColor, setWatermarkColor] = useState("#000000");
+  const [watermarkOpacity, setWatermarkOpacity] = useState(0.5);
+  // Image watermark options
+  const [watermarkImage, setWatermarkImage] = useState<ArrayBuffer | null>(null);
+  const [watermarkImageName, setWatermarkImageName] = useState<string>("");
+  const [watermarkImageType, setWatermarkImageType] = useState<"png" | "jpg">("png");
+  const [watermarkImageScale, setWatermarkImageScale] = useState(0.8);
 
   const {
     pdf,
@@ -92,13 +107,36 @@ export default function EditorPage() {
       backgroundColor = rgbToNormalized(detectedColor);
     }
 
+    // Build custom watermark options if enabled
+    let customWatermark = undefined;
+    if (addCustomWatermark) {
+      if (watermarkType === "text" && watermarkText.trim()) {
+        customWatermark = {
+          type: "text" as const,
+          text: watermarkText,
+          fontSize: watermarkFontSize,
+          color: hexToNormalizedRgb(watermarkColor),
+          opacity: watermarkOpacity,
+        };
+      } else if (watermarkType === "image" && watermarkImage) {
+        customWatermark = {
+          type: "image" as const,
+          imageData: watermarkImage,
+          imageType: watermarkImageType,
+          opacity: watermarkOpacity,
+          scale: watermarkImageScale,
+        };
+      }
+    }
+
     await processFile(stored.data, {
       selection,
       scale,
       applyToAllPages: applyToAll,
       backgroundColor,
+      customWatermark,
     });
-  }, [selection, scale, applyToAll, processFile]);
+  }, [selection, scale, applyToAll, addCustomWatermark, watermarkType, watermarkText, watermarkFontSize, watermarkColor, watermarkOpacity, watermarkImage, watermarkImageType, watermarkImageScale, processFile]);
 
   const handleDownload = useCallback(() => {
     downloadResult(filename);
@@ -226,6 +264,180 @@ export default function EditorPage() {
             </Card>
           )}
 
+          {/* Custom Watermark Options */}
+          {selection && (
+            <Card className="p-4">
+              <label className="flex items-center gap-2 cursor-pointer mb-3">
+                <div
+                  className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-colors
+                    ${addCustomWatermark
+                      ? "bg-blue-600 border-blue-600"
+                      : "border-gray-300 dark:border-gray-600"
+                    }`}
+                  onClick={() => setAddCustomWatermark(!addCustomWatermark)}
+                >
+                  {addCustomWatermark && <Check className="w-3 h-3 text-white" />}
+                </div>
+                <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Add custom watermark
+                </span>
+              </label>
+
+              {addCustomWatermark && (
+                <div className="space-y-3">
+                  {/* Type selector */}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setWatermarkType("text")}
+                      className={`flex-1 py-2 px-3 text-sm rounded-lg border transition-colors ${
+                        watermarkType === "text"
+                          ? "bg-blue-600 border-blue-600 text-white"
+                          : "border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+                      }`}
+                    >
+                      Text
+                    </button>
+                    <button
+                      onClick={() => setWatermarkType("image")}
+                      className={`flex-1 py-2 px-3 text-sm rounded-lg border transition-colors ${
+                        watermarkType === "image"
+                          ? "bg-blue-600 border-blue-600 text-white"
+                          : "border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+                      }`}
+                    >
+                      Image
+                    </button>
+                  </div>
+
+                  {/* Text watermark options */}
+                  {watermarkType === "text" && (
+                    <>
+                      <div>
+                        <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
+                          Watermark Text
+                        </label>
+                        <input
+                          type="text"
+                          value={watermarkText}
+                          onChange={(e) => setWatermarkText(e.target.value)}
+                          placeholder="Enter watermark text"
+                          className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
+                            Font Size
+                          </label>
+                          <input
+                            type="number"
+                            value={watermarkFontSize}
+                            onChange={(e) => setWatermarkFontSize(Number(e.target.value))}
+                            min={6}
+                            max={72}
+                            className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
+                            Color
+                          </label>
+                          <input
+                            type="color"
+                            value={watermarkColor}
+                            onChange={(e) => setWatermarkColor(e.target.value)}
+                            className="w-full h-9 border border-gray-300 dark:border-gray-600 rounded-lg cursor-pointer"
+                          />
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {/* Image watermark options */}
+                  {watermarkType === "image" && (
+                    <>
+                      <div>
+                        <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
+                          Upload Image (PNG or JPG)
+                        </label>
+                        {!watermarkImage ? (
+                          <label className="flex items-center justify-center gap-2 w-full py-3 px-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg cursor-pointer hover:border-blue-500 transition-colors">
+                            <Upload className="w-4 h-4 text-gray-500" />
+                            <span className="text-sm text-gray-500">Choose image</span>
+                            <input
+                              type="file"
+                              accept="image/png,image/jpeg"
+                              className="hidden"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file) {
+                                  const reader = new FileReader();
+                                  reader.onload = () => {
+                                    setWatermarkImage(reader.result as ArrayBuffer);
+                                    setWatermarkImageName(file.name);
+                                    setWatermarkImageType(file.type === "image/png" ? "png" : "jpg");
+                                  };
+                                  reader.readAsArrayBuffer(file);
+                                }
+                              }}
+                            />
+                          </label>
+                        ) : (
+                          <div className="flex items-center justify-between p-2 border border-gray-300 dark:border-gray-600 rounded-lg">
+                            <span className="text-sm text-gray-700 dark:text-gray-300 truncate max-w-[180px]">
+                              {watermarkImageName}
+                            </span>
+                            <button
+                              onClick={() => {
+                                setWatermarkImage(null);
+                                setWatermarkImageName("");
+                              }}
+                              className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"
+                            >
+                              <X className="w-4 h-4 text-gray-500" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      <div>
+                        <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
+                          Scale: {Math.round(watermarkImageScale * 100)}%
+                        </label>
+                        <input
+                          type="range"
+                          value={watermarkImageScale}
+                          onChange={(e) => setWatermarkImageScale(Number(e.target.value))}
+                          min={0.1}
+                          max={2}
+                          step={0.1}
+                          className="w-full"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {/* Opacity - shared by both types */}
+                  <div>
+                    <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
+                      Opacity: {Math.round(watermarkOpacity * 100)}%
+                    </label>
+                    <input
+                      type="range"
+                      value={watermarkOpacity}
+                      onChange={(e) => setWatermarkOpacity(Number(e.target.value))}
+                      min={0.1}
+                      max={1}
+                      step={0.1}
+                      className="w-full"
+                    />
+                  </div>
+                </div>
+              )}
+            </Card>
+          )}
+
           {/* Remove Button */}
           {selection && !result?.success && (
             <Button
@@ -234,7 +446,7 @@ export default function EditorPage() {
               className="w-full"
               size="lg"
             >
-              {isProcessing ? "Processing..." : "Remove Watermark"}
+              {isProcessing ? "Processing..." : (addCustomWatermark && (watermarkText || watermarkImage) ? "Replace Watermark" : "Remove Watermark")}
             </Button>
           )}
 

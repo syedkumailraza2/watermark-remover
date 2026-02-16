@@ -1,4 +1,4 @@
-import { PDFDocument, rgb } from "pdf-lib";
+import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import type { Selection } from "@/hooks/useSelection";
 
 export interface BackgroundColor {
@@ -7,12 +7,31 @@ export interface BackgroundColor {
   b: number;
 }
 
+export interface TextWatermark {
+  type: "text";
+  text: string;
+  fontSize: number;
+  color: BackgroundColor; // RGB values normalized 0-1
+  opacity: number; // 0-1
+}
+
+export interface ImageWatermark {
+  type: "image";
+  imageData: ArrayBuffer;
+  imageType: "png" | "jpg";
+  opacity: number; // 0-1
+  scale: number; // 0.1-2, scale relative to selection area
+}
+
+export type CustomWatermark = TextWatermark | ImageWatermark;
+
 export interface RemovalOptions {
   selection: Selection;
   scale: number;
   applyToAllPages: boolean;
   mode: "object" | "pixel" | "auto";
   backgroundColor?: BackgroundColor; // RGB values normalized 0-1
+  customWatermark?: CustomWatermark; // Optional replacement watermark
 }
 
 export interface RemovalResult {
@@ -74,6 +93,67 @@ export async function removeWatermark(
         color: rgb(bgColor.r, bgColor.g, bgColor.b),
         opacity: 1,
       });
+
+      // Add custom watermark if provided
+      if (options.customWatermark) {
+        const watermark = options.customWatermark;
+
+        if (watermark.type === "text" && watermark.text.trim()) {
+          const { text, fontSize, color, opacity } = watermark;
+          const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+          const textWidth = font.widthOfTextAtSize(text, fontSize);
+          const textHeight = fontSize;
+
+          // Center the text in the selection area
+          const textX = pdfX + (pdfWidth - textWidth) / 2;
+          const textY = pdfY + (pdfHeight - textHeight) / 2;
+
+          page.drawText(text, {
+            x: textX,
+            y: textY,
+            size: fontSize,
+            font,
+            color: rgb(color.r, color.g, color.b),
+            opacity,
+          });
+        } else if (watermark.type === "image") {
+          const { imageData, imageType, opacity, scale } = watermark;
+
+          // Embed the image based on type
+          const image = imageType === "png"
+            ? await pdfDoc.embedPng(imageData)
+            : await pdfDoc.embedJpg(imageData);
+
+          // Calculate scaled dimensions while maintaining aspect ratio
+          const imgAspect = image.width / image.height;
+          const areaAspect = pdfWidth / pdfHeight;
+
+          let drawWidth: number;
+          let drawHeight: number;
+
+          if (imgAspect > areaAspect) {
+            // Image is wider than area - fit to width
+            drawWidth = pdfWidth * scale;
+            drawHeight = drawWidth / imgAspect;
+          } else {
+            // Image is taller than area - fit to height
+            drawHeight = pdfHeight * scale;
+            drawWidth = drawHeight * imgAspect;
+          }
+
+          // Center the image in the selection area
+          const imgX = pdfX + (pdfWidth - drawWidth) / 2;
+          const imgY = pdfY + (pdfHeight - drawHeight) / 2;
+
+          page.drawImage(image, {
+            x: imgX,
+            y: imgY,
+            width: drawWidth,
+            height: drawHeight,
+            opacity,
+          });
+        }
+      }
     }
 
     onProgress?.({
