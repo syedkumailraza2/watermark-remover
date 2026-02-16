@@ -7,6 +7,13 @@ export interface BackgroundColor {
   b: number;
 }
 
+export interface GradientFill {
+  topLeft: BackgroundColor;
+  topRight: BackgroundColor;
+  bottomLeft: BackgroundColor;
+  bottomRight: BackgroundColor;
+}
+
 export interface TextWatermark {
   type: "text";
   text: string;
@@ -30,7 +37,11 @@ export interface RemovalOptions {
   scale: number;
   applyToAllPages: boolean;
   mode: "object" | "pixel" | "auto";
-  backgroundColor?: BackgroundColor; // RGB values normalized 0-1
+  backgroundColor?: BackgroundColor; // RGB values normalized 0-1 (used for single page or fallback)
+  backgroundColors?: BackgroundColor[]; // Per-page colors (index = page number - 1)
+  gradientFill?: GradientFill; // Gradient fill for single page
+  gradientFills?: GradientFill[]; // Per-page gradient fills
+  useGradient?: boolean; // Whether to use gradient fill
   customWatermark?: CustomWatermark; // Optional replacement watermark
 }
 
@@ -83,16 +94,65 @@ export async function removeWatermark(
       const pdfWidth = selection.width / scale;
       const pdfHeight = selection.height / scale;
 
-      // Draw a rectangle over the watermark area with detected or default color
-      const bgColor = options.backgroundColor || { r: 1, g: 1, b: 1 };
-      page.drawRectangle({
-        x: pdfX,
-        y: pdfY,
-        width: pdfWidth,
-        height: pdfHeight,
-        color: rgb(bgColor.r, bgColor.g, bgColor.b),
-        opacity: 1,
-      });
+      // Draw fill over the watermark area
+      const gradient = options.gradientFills?.[i] || options.gradientFill;
+
+      if (options.useGradient && gradient) {
+        // Draw gradient using multiple horizontal strips for smooth blending
+        const numStrips = Math.max(50, Math.ceil(pdfHeight)); // At least 50 strips for smoothness
+        const stripHeight = pdfHeight / numStrips;
+
+        for (let strip = 0; strip < numStrips; strip++) {
+          // Calculate vertical position (0 = bottom in PDF coords, 1 = top)
+          const t = strip / (numStrips - 1); // 0 to 1, bottom to top
+
+          // Bilinear interpolation for gradient
+          // At bottom (t=0): interpolate between bottomLeft and bottomRight
+          // At top (t=1): interpolate between topLeft and topRight
+          // Then interpolate vertically
+
+          // For each strip, also interpolate horizontally across width
+          // But since we're drawing full-width strips, we'll use the average of left and right
+          const leftColor = {
+            r: gradient.bottomLeft.r + t * (gradient.topLeft.r - gradient.bottomLeft.r),
+            g: gradient.bottomLeft.g + t * (gradient.topLeft.g - gradient.bottomLeft.g),
+            b: gradient.bottomLeft.b + t * (gradient.topLeft.b - gradient.bottomLeft.b),
+          };
+          const rightColor = {
+            r: gradient.bottomRight.r + t * (gradient.topRight.r - gradient.bottomRight.r),
+            g: gradient.bottomRight.g + t * (gradient.topRight.g - gradient.bottomRight.g),
+            b: gradient.bottomRight.b + t * (gradient.topRight.b - gradient.bottomRight.b),
+          };
+
+          // Average left and right for this strip (simple approach)
+          // For better results, we could draw multiple vertical strips too
+          const stripColor = {
+            r: (leftColor.r + rightColor.r) / 2,
+            g: (leftColor.g + rightColor.g) / 2,
+            b: (leftColor.b + rightColor.b) / 2,
+          };
+
+          page.drawRectangle({
+            x: pdfX,
+            y: pdfY + strip * stripHeight,
+            width: pdfWidth,
+            height: stripHeight + 0.5, // Slight overlap to prevent gaps
+            color: rgb(stripColor.r, stripColor.g, stripColor.b),
+            opacity: 1,
+          });
+        }
+      } else {
+        // Solid color fill
+        const bgColor = options.backgroundColors?.[i] || options.backgroundColor || { r: 1, g: 1, b: 1 };
+        page.drawRectangle({
+          x: pdfX,
+          y: pdfY,
+          width: pdfWidth,
+          height: pdfHeight,
+          color: rgb(bgColor.r, bgColor.g, bgColor.b),
+          opacity: 1,
+        });
+      }
 
       // Add custom watermark if provided
       if (options.customWatermark) {

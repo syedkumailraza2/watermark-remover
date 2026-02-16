@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Trash2, FileText, Check, Upload, X } from "lucide-react";
+import { ArrowLeft, Trash2, FileText, Check, Upload, X, Pipette } from "lucide-react";
 import { PDFViewer, PDFViewerHandle } from "@/components/pdf/PDFViewer";
 import { ZoomControls } from "@/components/pdf/ZoomControls";
 import { PageNavigation } from "@/components/pdf/PageNavigation";
@@ -14,7 +14,9 @@ import { useSelection } from "@/hooks/useSelection";
 import { useProcessing } from "@/hooks/useProcessing";
 import { getFile, clearFile } from "@/lib/storage/indexedDB";
 import { detectBackgroundColor, rgbToNormalized } from "@/lib/utils/colorDetection";
-import { hexToNormalizedRgb } from "@/lib/utils/colorUtils";
+import { detectColorsForAllPages, detectGradientsForAllPages } from "@/lib/utils/perPageColorDetection";
+import { detectGradientColors, rgbToNormalized as rawRgbToNormalized } from "@/lib/utils/colorDetection";
+import { hexToNormalizedRgb, rgbToHex } from "@/lib/utils/colorUtils";
 
 export default function EditorPage() {
   const router = useRouter();
@@ -23,6 +25,13 @@ export default function EditorPage() {
   const [filename, setFilename] = useState<string>("document.pdf");
   const [applyToAll, setApplyToAll] = useState(true);
   const [initialLoading, setInitialLoading] = useState(true);
+
+  // Background color state
+  const [useAutoColor, setUseAutoColor] = useState(true);
+  const [manualBgColor, setManualBgColor] = useState("#ffffff");
+  const [eyedropperMode, setEyedropperMode] = useState(false);
+  const [detectedColor, setDetectedColor] = useState<string | null>(null);
+  const [useGradientFill, setUseGradientFill] = useState(true); // Enable gradient by default for better results
 
   // Custom watermark state
   const [addCustomWatermark, setAddCustomWatermark] = useState(false);
@@ -99,12 +108,56 @@ export default function EditorPage() {
       return;
     }
 
-    // Detect background color from the canvas
+    // Get background color(s) or gradient(s)
     let backgroundColor = { r: 1, g: 1, b: 1 }; // Default white
-    const canvas = pdfViewerRef.current?.getCanvas();
-    if (canvas) {
-      const detectedColor = detectBackgroundColor(canvas, selection);
-      backgroundColor = rgbToNormalized(detectedColor);
+    let backgroundColors: { r: number; g: number; b: number }[] | undefined;
+    type GradientType = { topLeft: { r: number; g: number; b: number }; topRight: { r: number; g: number; b: number }; bottomLeft: { r: number; g: number; b: number }; bottomRight: { r: number; g: number; b: number } };
+    let gradientFill: GradientType | undefined;
+    let gradientFills: GradientType[] | undefined;
+
+    if (useAutoColor) {
+      if (useGradientFill) {
+        // Detect gradients for seamless blending
+        if (applyToAll && numPages > 1) {
+          gradientFills = await detectGradientsForAllPages(
+            stored.data.slice(0),
+            selection,
+            scale,
+            numPages
+          );
+        } else {
+          // Single page - detect gradient from current canvas
+          const canvas = pdfViewerRef.current?.getCanvas();
+          if (canvas) {
+            const detected = detectGradientColors(canvas, selection);
+            gradientFill = {
+              topLeft: rawRgbToNormalized(detected.topLeft),
+              topRight: rawRgbToNormalized(detected.topRight),
+              bottomLeft: rawRgbToNormalized(detected.bottomLeft),
+              bottomRight: rawRgbToNormalized(detected.bottomRight),
+            };
+          }
+        }
+      } else {
+        // Solid color detection
+        if (applyToAll && numPages > 1) {
+          backgroundColors = await detectColorsForAllPages(
+            stored.data.slice(0),
+            selection,
+            scale,
+            numPages
+          );
+        } else {
+          const canvas = pdfViewerRef.current?.getCanvas();
+          if (canvas) {
+            const detected = detectBackgroundColor(canvas, selection);
+            backgroundColor = rgbToNormalized(detected);
+          }
+        }
+      }
+    } else {
+      // Manual color - same for all pages (solid only)
+      backgroundColor = hexToNormalizedRgb(manualBgColor);
     }
 
     // Build custom watermark options if enabled
@@ -134,9 +187,13 @@ export default function EditorPage() {
       scale,
       applyToAllPages: applyToAll,
       backgroundColor,
+      backgroundColors,
+      useGradient: useGradientFill && useAutoColor,
+      gradientFill,
+      gradientFills,
       customWatermark,
     });
-  }, [selection, scale, applyToAll, addCustomWatermark, watermarkType, watermarkText, watermarkFontSize, watermarkColor, watermarkOpacity, watermarkImage, watermarkImageType, watermarkImageScale, processFile]);
+  }, [selection, scale, applyToAll, numPages, useAutoColor, useGradientFill, manualBgColor, addCustomWatermark, watermarkType, watermarkText, watermarkFontSize, watermarkColor, watermarkOpacity, watermarkImage, watermarkImageType, watermarkImageScale, processFile]);
 
   const handleDownload = useCallback(() => {
     downloadResult(filename);
@@ -146,6 +203,45 @@ export default function EditorPage() {
     await clearFile();
     router.push("/");
   }, [router]);
+
+  // Handle eyedropper color pick from canvas
+  const handleEyedropperClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!eyedropperMode) return;
+
+    const canvas = pdfViewerRef.current?.getCanvas();
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    try {
+      const pixel = ctx.getImageData(Math.floor(x), Math.floor(y), 1, 1).data;
+      const hex = rgbToHex(pixel[0], pixel[1], pixel[2]);
+      setManualBgColor(hex);
+      setUseAutoColor(false);
+      setEyedropperMode(false);
+    } catch (err) {
+      console.error("Failed to sample color:", err);
+    }
+  }, [eyedropperMode]);
+
+  // Update detected color preview when selection changes
+  useEffect(() => {
+    if (!selection) {
+      setDetectedColor(null);
+      return;
+    }
+
+    const canvas = pdfViewerRef.current?.getCanvas();
+    if (!canvas) return;
+
+    const detected = detectBackgroundColor(canvas, selection);
+    setDetectedColor(rgbToHex(detected.r, detected.g, detected.b));
+  }, [selection]);
 
   if (initialLoading || loading) {
     return (
@@ -199,18 +295,21 @@ export default function EditorPage() {
       <div className="flex-1 flex">
         {/* PDF Viewer */}
         <main className="flex-1 overflow-auto p-8 bg-gray-100 dark:bg-gray-950">
-          <div className="flex justify-center">
+          <div
+            className={`flex justify-center ${eyedropperMode ? "cursor-crosshair" : ""}`}
+            onClick={handleEyedropperClick}
+          >
             {pdf && (
               <PDFViewer
                 ref={pdfViewerRef}
                 pdf={pdf}
                 currentPage={currentPage}
                 scale={scale}
-                selection={selection}
-                isSelecting={isSelecting}
-                onSelectionStart={startSelection}
-                onSelectionMove={updateSelection}
-                onSelectionEnd={endSelection}
+                selection={eyedropperMode ? null : selection}
+                isSelecting={eyedropperMode ? false : isSelecting}
+                onSelectionStart={eyedropperMode ? () => {} : startSelection}
+                onSelectionMove={eyedropperMode ? () => {} : updateSelection}
+                onSelectionEnd={eyedropperMode ? () => {} : endSelection}
               />
             )}
           </div>
@@ -261,6 +360,101 @@ export default function EditorPage() {
                   Apply to all {numPages} pages
                 </span>
               </label>
+            </Card>
+          )}
+
+          {/* Background Color Options */}
+          {selection && (
+            <Card className="p-4">
+              <h3 className="font-semibold text-gray-900 dark:text-white mb-3">
+                Fill Color
+              </h3>
+
+              {/* Auto vs Manual toggle */}
+              <div className="flex gap-2 mb-3">
+                <button
+                  onClick={() => setUseAutoColor(true)}
+                  className={`flex-1 py-2 px-3 text-sm rounded-lg border transition-colors ${
+                    useAutoColor
+                      ? "bg-blue-600 border-blue-600 text-white"
+                      : "border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+                  }`}
+                >
+                  Auto
+                </button>
+                <button
+                  onClick={() => setUseAutoColor(false)}
+                  className={`flex-1 py-2 px-3 text-sm rounded-lg border transition-colors ${
+                    !useAutoColor
+                      ? "bg-blue-600 border-blue-600 text-white"
+                      : "border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+                  }`}
+                >
+                  Manual
+                </button>
+              </div>
+
+              {useAutoColor ? (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
+                    <div
+                      className="w-6 h-6 rounded border border-gray-300 dark:border-gray-600"
+                      style={{ backgroundColor: detectedColor || "#ffffff" }}
+                    />
+                    <span>Detected: {detectedColor || "N/A"}</span>
+                  </div>
+
+                  {/* Gradient fill toggle */}
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <div
+                      className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-colors
+                        ${useGradientFill
+                          ? "bg-blue-600 border-blue-600"
+                          : "border-gray-300 dark:border-gray-600"
+                        }`}
+                      onClick={() => setUseGradientFill(!useGradientFill)}
+                    >
+                      {useGradientFill && <Check className="w-3 h-3 text-white" />}
+                    </div>
+                    <span className="text-sm text-gray-700 dark:text-gray-300">
+                      Gradient fill (better blending)
+                    </span>
+                  </label>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="color"
+                      value={manualBgColor}
+                      onChange={(e) => setManualBgColor(e.target.value)}
+                      className="w-10 h-10 rounded border border-gray-300 dark:border-gray-600 cursor-pointer"
+                    />
+                    <input
+                      type="text"
+                      value={manualBgColor}
+                      onChange={(e) => setManualBgColor(e.target.value)}
+                      className="flex-1 px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white uppercase"
+                    />
+                    <button
+                      onClick={() => setEyedropperMode(!eyedropperMode)}
+                      className={`p-2 rounded-lg border transition-colors ${
+                        eyedropperMode
+                          ? "bg-blue-600 border-blue-600 text-white"
+                          : "border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+                      }`}
+                      title="Pick color from PDF"
+                    >
+                      <Pipette className="w-4 h-4" />
+                    </button>
+                  </div>
+                  {eyedropperMode && (
+                    <p className="text-xs text-blue-600 dark:text-blue-400">
+                      Click anywhere on the PDF to sample a color
+                    </p>
+                  )}
+                </div>
+              )}
             </Card>
           )}
 
